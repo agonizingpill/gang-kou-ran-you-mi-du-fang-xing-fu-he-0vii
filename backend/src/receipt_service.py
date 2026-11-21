@@ -41,6 +41,8 @@ def receive(s,id,u):
     old_density=c.density_15;weighted=((before*old_density+x.liters*x.density_15)/after).quantize(Decimal('.001'))
     t.liters=after;c.density_15=weighted;x.state='received';x.received_by=u['email']
     x.receipt_snapshot={'code':x.code,'tank_code':t.code,'grade':t.grade,'before_liters':float(before),'receipt_liters':float(x.liters),'after_liters':float(after),'capacity_liters':float(c.capacity_liters),'before_density_15':float(old_density),'arrival_density_15':float(x.density_15),'weighted_density_15':float(weighted),'received_by':u['email'],'at':now(),'density_formula':'(before_liters * before_density + receipt_liters * arrival_density) / after_liters'}
+    from .grade_service import void_pending
+    void_pending(s,t,'复判后罐内已入罐，待确认改牌建议作废',u)
     audit(s,u,'receipt_received',x.code+' / '+str(x.liters)+'L');return receipt_view(s,x)
 def reconciliation(s,data,u):
     tr=get(s,Transfer,data.transfer_id,True)

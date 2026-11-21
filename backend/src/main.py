@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from redis import Redis
 from .database import Base,engine,Session
 from .models import User,Tank,FuelSample,Transfer,Audit
+from .grade_models import SampleGrade
 from .schemas import Login,TankIn,TankState,SampleIn,RetestIn,TransferIn
 from .security import current,allow,password_hash,token_for
 from .transfer_service import obj,get,audit,sample_view,transfer_view,retest,request_transfer,release
@@ -21,12 +22,18 @@ async def lifespan(app):
     if os.getenv('SEED_DEMO','true')=='true':
         try:seed()
         except Exception:logging.exception('seed failed')
+    try:
+        from .grade_service import backfill
+        backfill()
+    except Exception:logging.exception('sample grade backfill failed')
     yield
 app=FastAPI(title='澄港 · 油样放行簿',lifespan=lifespan);app.add_middleware(RequestTrace);app.add_middleware(Recovery)
 from .receipt_routes import router as receipt_router
 app.include_router(receipt_router)
 from .harbor_routes import router as harbor_router
 app.include_router(harbor_router)
+from .grade_routes import router as grade_router
+app.include_router(grade_router)
 @app.exception_handler(IntegrityError)
 async def duplicate(request,e):return JSONResponse({'detail':'编号已存在或关联记录不合法'},status_code=409)
 @app.get('/health')
@@ -61,7 +68,10 @@ def samples(u=Depends(current)):
 def add_sample(d:SampleIn,u=Depends(current)):
     allow(u,'admin','chemist')
     with Session.begin() as s:
-        get(s,Tank,d.tank_id);x=FuelSample(**d.model_dump(),status='received',reference=False,evidence='',retest_note='');s.add(x);s.flush();audit(s,u,'sample_received',x.code);return sample_view(s,x)
+        t=get(s,Tank,d.tank_id)
+        x=FuelSample(**d.model_dump(),status='received',reference=False,evidence='',retest_note='');s.add(x);s.flush()
+        s.add(SampleGrade(sample_id=x.id,intake_grade=t.grade,accepted_grade=None))
+        audit(s,u,'sample_received',x.code);return sample_view(s,x)
 @app.post('/samples/{id}/compare')
 def compare_sample(id:int,u=Depends(current)):
     allow(u,'admin','chemist')
@@ -84,7 +94,9 @@ def new_transfer(d:TransferIn,u=Depends(current)):
 @app.post('/transfers/{id}/release')
 def release_transfer(id:int,u=Depends(current)):
     allow(u,'admin')
-    with Session.begin() as s:return release(s,get(s,Transfer,id,True),u)
+    # Lock order is Tank -> Transfer inside release(), matching grade-change
+    # confirmation so the two are arbitrated by who takes the tank lock first.
+    with Session.begin() as s:return release(s,get(s,Transfer,id),u)
 @app.get('/audit')
 def audit_logs(u=Depends(current)):
     with Session() as s:return [obj(x)for x in s.scalars(select(Audit).order_by(Audit.id.desc()).limit(35))]
